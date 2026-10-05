@@ -1,0 +1,1037 @@
+# -*- coding: utf-8 -*-
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+import json
+import os
+from datetime import datetime, timezone
+
+
+TOKEN = os.getenv("BOT_TOKEN")
+
+LOG_CHANNEL_ID = 1542216926879809566
+
+ALLOWED_ROLE_IDS = {
+    1542202831644131358,
+    1542218495280812062,
+    1542208806526652526,
+}
+
+PROTECTED_ROLE_IDS = set()
+
+DATABASE_FILE = "blessed_sanciones.json"
+
+
+intents = discord.Intents.default()
+intents.guilds = True
+intents.members = True
+
+
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents
+)
+
+tree = bot.tree
+
+
+def cargar_datos():
+    if not os.path.exists(DATABASE_FILE):
+        return {}
+
+    try:
+        with open(
+            DATABASE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as archivo:
+            return json.load(archivo)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def guardar_datos(datos):
+    with open(
+        DATABASE_FILE,
+        "w",
+        encoding="utf-8"
+    ) as archivo:
+        json.dump(
+            datos,
+            archivo,
+            indent=4,
+            ensure_ascii=False
+        )
+
+
+def obtener_historial(user_id: int):
+    datos = cargar_datos()
+    return datos.get(str(user_id), [])
+
+
+def guardar_sancion(
+    user_id: int,
+    username: str,
+    razon: str,
+    moderador: str,
+    moderador_id: int,
+    evidencia: str
+):
+    datos = cargar_datos()
+
+    user_key = str(user_id)
+
+    if user_key not in datos:
+        datos[user_key] = []
+
+    sancion = {
+        "username": username,
+        "user_id": user_id,
+        "razon": razon,
+        "moderador": moderador,
+        "moderador_id": moderador_id,
+        "evidencia": evidencia,
+        "fecha": datetime.now(timezone.utc).isoformat(),
+        "estado": "Activo"
+    }
+
+    datos[user_key].append(sancion)
+
+    guardar_datos(datos)
+
+
+def actualizar_ultima_sancion(
+    user_id: int,
+    estado: str
+):
+    datos = cargar_datos()
+
+    user_key = str(user_id)
+
+    if user_key not in datos:
+        return
+
+    if not datos[user_key]:
+        return
+
+    datos[user_key][-1]["estado"] = estado
+
+    guardar_datos(datos)
+
+
+def tiene_rol_autorizado(
+    member: discord.Member
+) -> bool:
+    return any(
+        role.id in ALLOWED_ROLE_IDS
+        for role in member.roles
+    )
+
+
+class BanBlessedModal(discord.ui.Modal):
+
+    def __init__(self):
+        super().__init__(
+            title="Ban Blessed"
+        )
+
+        self.user_id_input = discord.ui.TextInput(
+            label="ID del usuario",
+            placeholder="Ejemplo: 123456789012345678",
+            required=True,
+            max_length=25
+        )
+
+        self.razon_input = discord.ui.TextInput(
+            label="Razón",
+            placeholder="Indica el motivo del ban...",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=1000
+        )
+
+        self.evidencia_input = discord.ui.TextInput(
+            label="Evidencia",
+            placeholder="URL de imagen, vídeo, mensaje, etc. (opcional)",
+            required=False,
+            max_length=1000
+        )
+
+        self.add_item(self.user_id_input)
+        self.add_item(self.razon_input)
+        self.add_item(self.evidencia_input)
+
+    async def on_submit(
+        self,
+        interaction: discord.Interaction
+    ):
+
+        if not isinstance(
+            interaction.user,
+            discord.Member
+        ):
+            await interaction.response.send_message(
+                "\U0000274C No se pudo comprobar tu usuario.",
+                ephemeral=True
+            )
+            return
+
+        if not tiene_rol_autorizado(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "\U0000274C No tienes permiso para utilizar este sistema.",
+                ephemeral=True
+            )
+            return
+
+        try:
+            user_id = int(
+                self.user_id_input.value.strip()
+            )
+        except ValueError:
+            await interaction.response.send_message(
+                "\U0000274C El ID del usuario no es válido.",
+                ephemeral=True
+            )
+            return
+
+        razon = self.razon_input.value.strip()
+        evidencia = self.evidencia_input.value.strip()
+
+        guild = interaction.guild
+
+        if guild is None:
+            await interaction.response.send_message(
+                "\U0000274C Este comando solo puede utilizarse dentro del servidor.",
+                ephemeral=True
+            )
+            return
+
+        try:
+            miembro = await guild.fetch_member(user_id)
+        except discord.NotFound:
+            miembro = None
+        except discord.HTTPException:
+            miembro = None
+
+        if miembro:
+
+            roles_protegidos = [
+                role
+                for role in miembro.roles
+                if role.id in PROTECTED_ROLE_IDS
+            ]
+
+            if roles_protegidos:
+                await interaction.response.send_message(
+                    "\U0000274C No puedes banear a este usuario porque tiene un rol protegido.",
+                    ephemeral=True
+                )
+                return
+
+            if (
+                guild.me
+                and miembro.top_role >= guild.me.top_role
+            ):
+                await interaction.response.send_message(
+                    "\U0000274C No puedo banear a este usuario porque su rol está por encima o al mismo nivel que el mío.",
+                    ephemeral=True
+                )
+                return
+
+        try:
+
+            await guild.ban(
+                discord.Object(id=user_id),
+                reason=(
+                    f"{razon} | "
+                    f"Moderador: {interaction.user}"
+                )
+            )
+
+        except discord.NotFound:
+            await interaction.response.send_message(
+                "\U0000274C No se encontró al usuario.",
+                ephemeral=True
+            )
+            return
+
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "\U0000274C No tengo permisos suficientes para banear a este usuario.",
+                ephemeral=True
+            )
+            return
+
+        except discord.HTTPException as e:
+            await interaction.response.send_message(
+                f"\U0000274C Discord rechazó el ban.\n`{e}`",
+                ephemeral=True
+            )
+            return
+
+        username = f"Usuario {user_id}"
+        avatar_url = None
+
+        if miembro:
+
+            username = str(miembro)
+            avatar_url = miembro.display_avatar.url
+
+        else:
+
+            try:
+                usuario = await bot.fetch_user(user_id)
+
+                username = str(usuario)
+                avatar_url = usuario.display_avatar.url
+
+            except Exception:
+                pass
+
+        guardar_sancion(
+            user_id=user_id,
+            username=username,
+            razon=razon,
+            moderador=str(interaction.user),
+            moderador_id=interaction.user.id,
+            evidencia=evidencia
+        )
+
+        embed = discord.Embed(
+            title="\U0001F528 Usuario baneado",
+            description=(
+                f"**{username}** ha sido baneado "
+                f"del servidor."
+            ),
+            color=discord.Color.red(),
+            timestamp=datetime.now(timezone.utc)
+        )
+
+        embed.add_field(
+            name="\U0001F464 Usuario",
+            value=(
+                f"<@{user_id}>\n"
+                f"`{username}`"
+            ),
+            inline=True
+        )
+
+        embed.add_field(
+            name="\U0001F194 ID",
+            value=f"`{user_id}`",
+            inline=True
+        )
+
+        embed.add_field(
+            name="\U0001F4DD Razón",
+            value=razon,
+            inline=False
+        )
+
+        embed.add_field(
+            name="\U0001F6E1\uFE0F Moderador",
+            value=interaction.user.mention,
+            inline=True
+        )
+
+        embed.add_field(
+            name="\U0001F4C5 Fecha",
+            value=(
+                f"<t:{int(datetime.now(timezone.utc).timestamp())}:F>"
+            ),
+            inline=True
+        )
+
+        embed.add_field(
+            name="\U0001F512 Estado",
+            value="Ban permanente",
+            inline=True
+        )
+
+        if evidencia:
+            embed.add_field(
+                name="\U0001F4F8 Evidencia",
+                value=evidencia,
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="\U0001F4F8 Evidencia",
+                value="No proporcionada.",
+                inline=False
+            )
+
+        if avatar_url:
+            embed.set_thumbnail(
+                url=avatar_url
+            )
+
+        embed.set_footer(
+            text="Blessed Moderation"
+        )
+
+        log_channel = guild.get_channel(
+            LOG_CHANNEL_ID
+        )
+
+        if log_channel:
+
+            await log_channel.send(
+                embed=embed,
+                view=BanLogView(user_id)
+            )
+
+        if miembro:
+
+            try:
+
+                dm_embed = discord.Embed(
+                    title="\U0001F6AB Has sido baneado",
+                    description=(
+                        f"Has sido baneado de **{guild.name}**."
+                    ),
+                    color=discord.Color.red()
+                )
+
+                dm_embed.add_field(
+                    name="\U0001F4DD Razón",
+                    value=razon,
+                    inline=False
+                )
+
+                dm_embed.add_field(
+                    name="\U0001F512 Duración",
+                    value="Permanente",
+                    inline=True
+                )
+
+                dm_embed.add_field(
+                    name="\U0001F6E1\uFE0F Moderador",
+                    value=str(interaction.user),
+                    inline=True
+                )
+
+                await miembro.send(
+                    embed=dm_embed
+                )
+
+            except discord.HTTPException:
+                pass
+
+        await interaction.response.send_message(
+            f"\U00002705 Usuario `{user_id}` baneado correctamente.",
+            ephemeral=True
+        )
+
+
+class BanLogView(discord.ui.View):
+
+    def __init__(
+        self,
+        user_id: int
+    ):
+        super().__init__(
+            timeout=None
+        )
+
+        self.user_id = user_id
+
+        historial_button = discord.ui.Button(
+            label="Ver historial",
+            emoji="\U0001F4CB",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"blessed_historial_{user_id}"
+        )
+
+        historial_button.callback = self.ver_historial
+
+        self.add_item(
+            historial_button
+        )
+
+        unban_button = discord.ui.Button(
+            label="Desbanear",
+            emoji="\U0001F513",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"blessed_unban_{user_id}"
+        )
+
+        unban_button.callback = self.desbanear
+
+        self.add_item(
+            unban_button
+        )
+
+        perfil_button = discord.ui.Button(
+            label="Ver perfil",
+            emoji="\U0001F464",
+            style=discord.ButtonStyle.link,
+            url=f"https://discord.com/users/{user_id}"
+        )
+
+        self.add_item(
+            perfil_button
+        )
+
+    async def ver_historial(
+        self,
+        interaction: discord.Interaction
+    ):
+
+        if not isinstance(
+            interaction.user,
+            discord.Member
+        ):
+            await interaction.response.send_message(
+                "\U0000274C No tienes permiso.",
+                ephemeral=True
+            )
+            return
+
+        if not tiene_rol_autorizado(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "\U0000274C No tienes permiso para utilizar este botón.",
+                ephemeral=True
+            )
+            return
+
+        historial = obtener_historial(
+            self.user_id
+        )
+
+        if not historial:
+            await interaction.response.send_message(
+                "\U0001F4CB Este usuario no tiene historial de sanciones.",
+                ephemeral=True
+            )
+            return
+
+        embed = discord.Embed(
+            title="\U0001F4CB Historial de sanciones",
+            description=(
+                f"Usuario: <@{self.user_id}>"
+            ),
+            color=discord.Color.blurple()
+        )
+
+        ultimas = historial[-10:]
+
+        for numero, sancion in enumerate(
+            reversed(ultimas),
+            start=1
+        ):
+
+            fecha = sancion.get(
+                "fecha",
+                "Desconocida"
+            )
+
+            try:
+
+                fecha_dt = datetime.fromisoformat(
+                    fecha
+                )
+
+                fecha_texto = (
+                    f"<t:{int(fecha_dt.timestamp())}:F>"
+                )
+
+            except Exception:
+
+                fecha_texto = fecha
+
+            texto = (
+                f"\U0001F4DD **Razón:** "
+                f"{sancion.get('razon', 'Sin razón')}\n"
+                f"\U0001F6E1\uFE0F **Moderador:** "
+                f"{sancion.get('moderador', 'Desconocido')}\n"
+                f"\U0001F4C5 **Fecha:** "
+                f"{fecha_texto}\n"
+                f"\U0001F512 **Estado:** "
+                f"{sancion.get('estado', 'Desconocido')}"
+            )
+
+            evidencia = sancion.get(
+                "evidencia",
+                ""
+            )
+
+            if evidencia:
+                texto += (
+                    f"\n\U0001F4F8 **Evidencia:** "
+                    f"{evidencia}"
+                )
+
+            embed.add_field(
+                name=f"Registro {numero}",
+                value=texto,
+                inline=False
+            )
+
+        await interaction.response.send_message(
+            embed=embed,
+            ephemeral=True
+        )
+
+    async def desbanear(
+        self,
+        interaction: discord.Interaction
+    ):
+
+        if not isinstance(
+            interaction.user,
+            discord.Member
+        ):
+            await interaction.response.send_message(
+                "\U0000274C No tienes permiso.",
+                ephemeral=True
+            )
+            return
+
+        if not tiene_rol_autorizado(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "\U0000274C No tienes permiso para utilizar este botón.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            (
+                f"\U000026A0\uFE0F ¿Seguro que quieres "
+                f"desbanear a <@{self.user_id}>?"
+            ),
+            view=ConfirmUnbanView(
+                self.user_id
+            ),
+            ephemeral=True
+        )
+
+
+class ConfirmUnbanView(
+    discord.ui.View
+):
+
+    def __init__(
+        self,
+        user_id: int
+    ):
+        super().__init__(
+            timeout=60
+        )
+
+        self.user_id = user_id
+
+    @discord.ui.button(
+        label="Confirmar desban",
+        emoji="\U0001F513",
+        style=discord.ButtonStyle.success
+    )
+    async def confirmar(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        if not isinstance(
+            interaction.user,
+            discord.Member
+        ):
+            await interaction.response.send_message(
+                "\U0000274C No tienes permiso.",
+                ephemeral=True
+            )
+            return
+
+        if not tiene_rol_autorizado(
+            interaction.user
+        ):
+            await interaction.response.send_message(
+                "\U0000274C No tienes permiso.",
+                ephemeral=True
+            )
+            return
+
+        guild = interaction.guild
+
+        if guild is None:
+            await interaction.response.send_message(
+                "\U0000274C Este botón solo funciona dentro del servidor.",
+                ephemeral=True
+            )
+            return
+
+        try:
+
+            await guild.fetch_ban(
+                discord.Object(
+                    id=self.user_id
+                )
+            )
+
+        except discord.NotFound:
+
+            await interaction.response.send_message(
+                "\U00002705 Este usuario ya no está baneado.",
+                ephemeral=True
+            )
+
+            return
+
+        except discord.HTTPException as e:
+
+            await interaction.response.send_message(
+                f"\U0000274C No pude comprobar el ban.\n`{e}`",
+                ephemeral=True
+            )
+
+            return
+
+        try:
+
+            await guild.unban(
+                discord.Object(
+                    id=self.user_id
+                ),
+                reason=(
+                    f"Desbaneado por "
+                    f"{interaction.user}"
+                )
+            )
+
+        except discord.Forbidden:
+
+            await interaction.response.send_message(
+                "\U0000274C No tengo permisos para desbanear.",
+                ephemeral=True
+            )
+
+            return
+
+        except discord.HTTPException as e:
+
+            await interaction.response.send_message(
+                f"\U0000274C Discord rechazó el desban.\n`{e}`",
+                ephemeral=True
+            )
+
+            return
+
+        actualizar_ultima_sancion(
+            self.user_id,
+            "Desbaneado"
+        )
+
+        log_channel = guild.get_channel(
+            LOG_CHANNEL_ID
+        )
+
+        if log_channel:
+
+            embed = discord.Embed(
+                title="\U0001F513 Usuario desbaneado",
+                description=(
+                    f"<@{self.user_id}> ha sido desbaneado."
+                ),
+                color=discord.Color.green(),
+                timestamp=datetime.now(
+                    timezone.utc
+                )
+            )
+
+            embed.add_field(
+                name="\U0001F464 Usuario",
+                value=f"<@{self.user_id}>",
+                inline=True
+            )
+
+            embed.add_field(
+                name="\U0001F194 ID",
+                value=f"`{self.user_id}`",
+                inline=True
+            )
+
+            embed.add_field(
+                name="\U0001F6E1\uFE0F Moderador",
+                value=interaction.user.mention,
+                inline=False
+            )
+
+            embed.set_footer(
+                text="Blessed Moderation"
+            )
+
+            await log_channel.send(
+                embed=embed
+            )
+
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.response.edit_message(
+            content=(
+                f"\U00002705 <@{self.user_id}> "
+                f"ha sido desbaneado correctamente."
+            ),
+            view=self
+        )
+
+    @discord.ui.button(
+        label="Cancelar",
+        emoji="\U0000274C",
+        style=discord.ButtonStyle.secondary
+    )
+    async def cancelar(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.response.edit_message(
+            content="\U0000274C Desban cancelado.",
+            view=self
+        )
+
+
+@tree.command(
+    name="banblessed",
+    description="Banea permanentemente a un usuario de Blessed."
+)
+async def banblessed(
+    interaction: discord.Interaction
+):
+
+    if not isinstance(
+        interaction.user,
+        discord.Member
+    ):
+        await interaction.response.send_message(
+            "\U0000274C No tienes permiso.",
+            ephemeral=True
+        )
+        return
+
+    if not tiene_rol_autorizado(
+        interaction.user
+    ):
+        await interaction.response.send_message(
+            "\U0000274C No tienes permiso para utilizar este comando.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_modal(
+        BanBlessedModal()
+    )
+
+
+@tree.command(
+    name="unbanblessed",
+    description="Desbanea a un usuario de Blessed."
+)
+@app_commands.describe(
+    user_id="ID del usuario que quieres desbanear"
+)
+async def unbanblessed(
+    interaction: discord.Interaction,
+    user_id: str
+):
+
+    if not isinstance(
+        interaction.user,
+        discord.Member
+    ):
+        await interaction.response.send_message(
+            "\U0000274C No tienes permiso.",
+            ephemeral=True
+        )
+        return
+
+    if not tiene_rol_autorizado(
+        interaction.user
+    ):
+        await interaction.response.send_message(
+            "\U0000274C No tienes permiso para utilizar este comando.",
+            ephemeral=True
+        )
+        return
+
+    try:
+        target_id = int(user_id)
+    except ValueError:
+        await interaction.response.send_message(
+            "\U0000274C El ID no es válido.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        (
+            f"\U000026A0\uFE0F ¿Seguro que quieres "
+            f"desbanear a <@{target_id}>?"
+        ),
+        view=ConfirmUnbanView(
+            target_id
+        ),
+        ephemeral=True
+    )
+
+
+@tree.command(
+    name="historial",
+    description="Consulta el historial de sanciones de un usuario."
+)
+@app_commands.describe(
+    user_id="ID del usuario"
+)
+async def historial(
+    interaction: discord.Interaction,
+    user_id: str
+):
+
+    if not isinstance(
+        interaction.user,
+        discord.Member
+    ):
+        await interaction.response.send_message(
+            "\U0000274C No tienes permiso.",
+            ephemeral=True
+        )
+        return
+
+    if not tiene_rol_autorizado(
+        interaction.user
+    ):
+        await interaction.response.send_message(
+            "\U0000274C No tienes permiso para utilizar este comando.",
+            ephemeral=True
+        )
+        return
+
+    try:
+        target_id = int(user_id)
+    except ValueError:
+        await interaction.response.send_message(
+            "\U0000274C El ID no es válido.",
+            ephemeral=True
+        )
+        return
+
+    historial_data = obtener_historial(
+        target_id
+    )
+
+    if not historial_data:
+        await interaction.response.send_message(
+            "\U0001F4CB Este usuario no tiene historial de sanciones.",
+            ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(
+        title="\U0001F4CB Historial de sanciones",
+        description=(
+            f"Usuario: <@{target_id}>"
+        ),
+        color=discord.Color.blurple()
+    )
+
+    ultimas = historial_data[-10:]
+
+    for numero, sancion in enumerate(
+        reversed(ultimas),
+        start=1
+    ):
+
+        fecha = sancion.get(
+            "fecha",
+            "Desconocida"
+        )
+
+        try:
+
+            fecha_dt = datetime.fromisoformat(
+                fecha
+            )
+
+            fecha_texto = (
+                f"<t:{int(fecha_dt.timestamp())}:F>"
+            )
+
+        except Exception:
+
+            fecha_texto = fecha
+
+        texto = (
+            f"\U0001F4DD **Razón:** "
+            f"{sancion.get('razon', 'Sin razón')}\n"
+            f"\U0001F6E1\uFE0F **Moderador:** "
+            f"{sancion.get('moderador', 'Desconocido')}\n"
+            f"\U0001F4C5 **Fecha:** "
+            f"{fecha_texto}\n"
+            f"\U0001F512 **Estado:** "
+            f"{sancion.get('estado', 'Desconocido')}"
+        )
+
+        evidencia = sancion.get(
+            "evidencia",
+            ""
+        )
+
+        if evidencia:
+            texto += (
+                f"\n\U0001F4F8 **Evidencia:** "
+                f"{evidencia}"
+            )
+
+        embed.add_field(
+            name=f"Registro {numero}",
+            value=texto,
+            inline=False
+        )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True
+    )
+
+
+@bot.event
+async def on_ready():
+
+    print(
+        f"Bot conectado como {bot.user}"
+    )
+
+    print(
+        f"ID del bot: {bot.user.id}"
+    )
+
+
+@bot.event
+async def setup_hook():
+
+    await tree.sync()
+
+    print(
+        "Comandos slash sincronizados."
+    )
+
+
+if __name__ == "__main__":
+
+    if not TOKEN:
+        raise RuntimeError(
+            "No se encontró la variable BOT_TOKEN."
+        )
+
+    bot.run(TOKEN)
