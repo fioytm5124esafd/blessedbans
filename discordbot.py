@@ -5,11 +5,9 @@ from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timezone
 import os
-from motor.motor_asyncio import AsyncIOMotorClient
 
 
 TOKEN = os.getenv("BOT_TOKEN")
-MONGODB_URI = os.getenv("MONGODB_URI")
 
 LOG_CHANNEL_ID = 1542216926879809566
 
@@ -28,48 +26,26 @@ intents.members = True
 
 
 bot = commands.Bot(
-    command_prefix="!",
-    intents=intents
+    command_prefix=commands.when_mentioned,
+    intents=intents,
+    help_command=None
 )
 
 tree = bot.tree
 
 
 # ---------------------------------------------------------------------------
-# CONEXIÓN A MONGODB
+# "BASE DE DATOS" EN MEMORIA
 # ---------------------------------------------------------------------------
-mongo_client = None
-db = None
-sanciones_collection = None
+# Estructura:
+# {
+#     user_id (int): [ {sancion1}, {sancion2}, ... ]
+# }
+sanciones_db = {}
 
 
-async def inicializar_mongodb():
-    global mongo_client, db, sanciones_collection
-
-    if not MONGODB_URI:
-        raise RuntimeError(
-            "No se encontró la variable MONGODB_URI. "
-            "Configúrala en Railway."
-        )
-
-    mongo_client = AsyncIOMotorClient(MONGODB_URI)
-    db = mongo_client["blessed_db"]
-    sanciones_collection = db["sanciones"]
-
-    await sanciones_collection.create_index("user_id")
-
-    print("Conectado a MongoDB Atlas correctamente.")
-
-
-# ---------------------------------------------------------------------------
-# OPERACIONES DE BASE DE DATOS
-# ---------------------------------------------------------------------------
 async def obtener_historial(user_id: int):
-    cursor = sanciones_collection.find(
-        {"user_id": user_id}
-    ).sort("fecha", 1)
-
-    return await cursor.to_list(length=None)
+    return sanciones_db.get(user_id, [])
 
 
 async def guardar_sancion(
@@ -80,6 +56,9 @@ async def guardar_sancion(
     moderador_id: int,
     evidencia: str
 ):
+    if user_id not in sanciones_db:
+        sanciones_db[user_id] = []
+
     sancion = {
         "username": username,
         "user_id": user_id,
@@ -91,23 +70,22 @@ async def guardar_sancion(
         "estado": "En Blacklist"
     }
 
-    await sanciones_collection.insert_one(sancion)
+    sanciones_db[user_id].append(sancion)
 
 
 async def actualizar_ultima_sancion(
     user_id: int,
     estado: str
 ):
-    ultima = await sanciones_collection.find_one(
-        {"user_id": user_id, "estado": "En Blacklist"},
-        sort=[("fecha", -1)]
-    )
+    if user_id not in sanciones_db or not sanciones_db[user_id]:
+        return
 
-    if ultima:
-        await sanciones_collection.update_one(
-            {"_id": ultima["_id"]},
-            {"$set": {"estado": estado}}
-        )
+    for sancion in reversed(sanciones_db[user_id]):
+        if sancion.get("estado") == "En Blacklist":
+            sancion["estado"] = estado
+            break
+    else:
+        sanciones_db[user_id][-1]["estado"] = estado
 
 
 # ---------------------------------------------------------------------------
@@ -779,12 +757,8 @@ async def on_ready():
 
 @bot.event
 async def setup_hook():
-    await inicializar_mongodb()
-
-    # Borrar comandos globales antiguos y volver a sincronizar
-    tree.clear_commands(guild=None)
+    # Sincronizar comandos globales
     await tree.sync()
-
     print("Comandos slash sincronizados.")
 
 
