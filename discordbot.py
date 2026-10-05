@@ -56,7 +56,6 @@ async def inicializar_mongodb():
     db = mongo_client["blessed_db"]
     sanciones_collection = db["sanciones"]
 
-    # Crear índice para búsquedas rápidas por user_id
     await sanciones_collection.create_index("user_id")
 
     print("Conectado a MongoDB Atlas correctamente.")
@@ -66,7 +65,6 @@ async def inicializar_mongodb():
 # OPERACIONES DE BASE DE DATOS
 # ---------------------------------------------------------------------------
 async def obtener_historial(user_id: int):
-    """Devuelve la lista de sanciones de un usuario, ordenada por fecha."""
     cursor = sanciones_collection.find(
         {"user_id": user_id}
     ).sort("fecha", 1)
@@ -100,7 +98,6 @@ async def actualizar_ultima_sancion(
     user_id: int,
     estado: str
 ):
-    """Actualiza el estado de la última sanción activa del usuario."""
     ultima = await sanciones_collection.find_one(
         {"user_id": user_id, "estado": "En Blacklist"},
         sort=[("fecha", -1)]
@@ -219,7 +216,6 @@ class BanBlessedModal(discord.ui.Modal):
                 )
                 return
 
-        # Comprobar si ya está blacklisteado
         try:
             await guild.fetch_ban(discord.Object(id=user_id))
             ya_en_blacklist = True
@@ -618,11 +614,11 @@ class ConfirmUnbanView(discord.ui.View):
 # COMANDOS SLASH
 # ---------------------------------------------------------------------------
 @tree.command(
-    name="blblessed",
+    name="bl",
     description="Añade permanentemente a un usuario a la Blacklist de Blessed."
 )
 @app_commands.guild_only()
-async def blblessedblessed(interaction: discord.Interaction):
+async def bl(interaction: discord.Interaction):
     if not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message(
             "\U0000274C No tienes permiso.",
@@ -641,14 +637,14 @@ async def blblessedblessed(interaction: discord.Interaction):
 
 
 @tree.command(
-    name="unblblessed",
+    name="unbl",
     description="Quita a un usuario de la Blacklist de Blessed."
 )
 @app_commands.guild_only()
 @app_commands.describe(
     user_id="ID del usuario que quieres quitar de la Blacklist"
 )
-async def unbanblessed(interaction: discord.Interaction, user_id: str):
+async def unbl(interaction: discord.Interaction, user_id: str):
     if not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message(
             "\U0000274C No tienes permiso.",
@@ -784,7 +780,11 @@ async def on_ready():
 @bot.event
 async def setup_hook():
     await inicializar_mongodb()
+
+    # Borrar comandos globales antiguos y volver a sincronizar
+    tree.clear_commands(guild=None)
     await tree.sync()
+
     print("Comandos slash sincronizados.")
 
 
